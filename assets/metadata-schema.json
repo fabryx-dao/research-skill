@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Video Metadata Schema",
+  "description": "Validated schema for video metadata",
+  "type": "object",
+  "required": ["videoId", "title", "url", "processedDate"],
+  "properties": {
+    "videoId": {
+      "type": "string",
+      "pattern": "^\\d{4}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "url": {
+      "type": "string",
+      "pattern": "^https://www\\.youtube\\.com/watch\\?v=[A-Za-z0-9_-]+$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^\\d+:\\d{2}(:\\d{2})?$"
+    },
+    "processedDate": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "sourceId": {
+      "type": "string",
+      "pattern": "^\\d{3}$"
+    },
+    "sourceName": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "thumbnailUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "channelName": {
+      "type": "string"
+    },
+    "publishedDate": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    }
+  }
+}

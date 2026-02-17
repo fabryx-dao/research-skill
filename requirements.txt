@@ -1,0 +1,16 @@
+# Research Skill Dependencies
+
+# Core ML framework
+dspy-ai>=2.4.0
+
+# Transcription
+assemblyai>=0.17.0
+
+# Video download
+yt-dlp>=2023.0.0
+
+# JSON validation
+jsonschema>=4.17.0
+
+# Utilities
+python-dotenv>=1.0.0

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Research skill wrapper - uses venv python
+
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_PYTHON="$SKILL_DIR/venv/bin/python3"
+
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "Error: Virtual environment not found at $SKILL_DIR/venv"
+    echo "Run: cd $SKILL_DIR && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt"
+    exit 1
+fi
+
+exec "$VENV_PYTHON" "$SKILL_DIR/scripts/process_video.py" "$@"
