@@ -151,12 +151,10 @@ def research(
         # Stage 5: Theory synthesis
         progress.update('theory', 'started', 'Synthesizing theory document')
         theory_result = synthesize_theory(
-            graph_path=graph_result['path'],
-            terms_path=terms_result['path'],
             source_name=source_name,
             domain=domain,
-            existing_theory_path=existing_theory,
-            claims_path=claims_result['clean_path']
+            claims_path=claims_result['clean_path'],
+            existing_theory_path=existing_theory
         )
         results['theory'] = theory_result
         progress.update('theory', 'completed', f"Theory {'created' if theory_result['created'] else 'updated'}")

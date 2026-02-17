@@ -5,14 +5,12 @@ Stage 5: Synthesize coherent theory narrative from graph + terms.
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-import dspy
-from dspy import Signature, InputField, OutputField
+import anthropic
 import tiktoken
-
-from validate import validate_and_load
 
 logger = logging.getLogger(__name__)
 
@@ -30,26 +28,20 @@ def count_tokens(text: str, model: str = "cl100k_base") -> int:
     return len(enc.encode(text))
 
 
-# DSPy signature for theory synthesis
-class SynthesizeTheory(Signature):
-    """Synthesize coherent narrative of author's worldview from knowledge graph + terms."""
-    
-    source_name: str = InputField(desc="Name of the source/author")
-    domain: str = InputField(desc="Research domain (e.g., theology/pharmacology)")
-    graph_summary: str = InputField(desc="Summary of key nodes/edges from knowledge graph")
-    terms_summary: str = InputField(desc="Summary of key term definitions")
-    existing_theory: str = InputField(desc="Existing THEORY.md section headers if updating, or 'none'")
-    new_video_claims: str = InputField(desc="Key claims from new video if updating, or 'none'")
-    
-    theory: str = OutputField(
-        desc="Coherent narrative synthesizing the author's worldview from current graph+terms data. "
-             "Write in clear prose that connects concepts into a unified theory. "
-             "Organize into thematic sections with markdown headers (## Section). "
-             "State ONLY what the source material establishes - zero external knowledge. "
-             "NO citations - this is clean prose. Evidence lives in graph/terms layers. "
-             "If existing sections provided: synthesize fresh from current data, maintaining similar structure/themes. "
-             "Focus on the most important concepts from the graph, not exhaustive coverage."
-    )
+# System prompt for theory synthesis
+THEORY_SYNTHESIS_SYSTEM = """You synthesize coherent narratives of an author's worldview from source material.
+
+Your task:
+1. Read the existing theory (if provided) and new video claims
+2. EXPAND the existing theory with new insights from the claims
+3. Add new sections if new themes emerge
+4. Preserve existing narrative flow
+5. Write in clear prose with markdown headers (## Section)
+6. State ONLY what the source material establishes - zero external knowledge
+7. NO citations - evidence lives in structured data layers
+8. Keep under 40K tokens - focus on most important concepts
+
+Output format: Markdown document with thematic sections."""
 
 
 def summarize_graph(graph: Dict[str, Any], max_nodes: int = 30) -> str:
@@ -120,18 +112,15 @@ def summarize_terms(terms: List[Dict[str, Any]]) -> str:
 
 def load_existing_theory(theory_path: Optional[Path]) -> str:
     """
-    Load existing THEORY.md section headers (not full content).
+    Load existing THEORY.md full content.
     
-    For large theories, passing full content creates massive prompts that timeout.
-    Instead, pass only section structure so LLM knows what exists.
-    
-    Also validates that existing theory doesn't exceed size limits.
+    Validates that existing theory doesn't exceed size limits.
     
     Args:
         theory_path: Path to THEORY.md
     
     Returns:
-        Section headers or "none"
+        Full theory content or "none"
     
     Raises:
         ValueError: If existing theory exceeds hard token limit
@@ -156,29 +145,17 @@ def load_existing_theory(theory_path: Optional[Path]) -> str:
             f"adding new content. Target: {THEORY_TARGET_TOKENS:,} tokens."
         )
     
-    # Extract section headers only (## lines)
-    headers = []
-    for line in content.split('\n'):
-        if line.startswith('##'):
-            headers.append(line)
-    
-    if not headers:
-        return "none"
-    
-    return "EXISTING SECTIONS:\n" + "\n".join(headers[:50])  # Max 50 headers
+    return content
 
 
-def synthesize_theory_dspy(
+def synthesize_theory_anthropic(
     source_name: str,
     domain: str,
-    graph_summary: str,
-    terms_summary: str,
     existing_theory: str = "none",
-    new_video_claims: Optional[str] = None,
-    model: str = "claude-opus-4-6"
+    new_video_claims: Optional[str] = None
 ) -> str:
     """
-    Synthesize theory using DSPy with Claude Opus 4.6.
+    Synthesize theory using Anthropic SDK with Claude Opus 4.6.
     
     Enforces token limits:
     - Target: 40K tokens (conservative)
@@ -187,11 +164,8 @@ def synthesize_theory_dspy(
     Args:
         source_name: Name of source/author
         domain: Research domain
-        graph_summary: Summary of knowledge graph
-        terms_summary: Summary of terms
-        existing_theory: Existing THEORY.md section headers
-        new_video_claims: Key claims from new video
-        model: DSPy model (default: claude-opus-4-6)
+        existing_theory: Existing THEORY.md full content
+        new_video_claims: Domain-relevant claims from new video
     
     Returns:
         THEORY.md markdown content
@@ -199,36 +173,80 @@ def synthesize_theory_dspy(
     Raises:
         ValueError: If generated theory exceeds hard token limit
     """
-    # Setup DSPy
-    lm = dspy.LM(model)
-    dspy.configure(lm=lm)
+    print(f"\n[1/7] Getting ANTHROPIC_API_KEY...")
+    # Get API key
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY not found in environment")
+    print(f"[1/7] ✓ API key found (length: {len(api_key)})")
     
-    # Create synthesis module
-    synthesize = dspy.ChainOfThought(SynthesizeTheory)
+    print(f"[2/7] Creating Anthropic client...")
+    client = anthropic.Anthropic(api_key=api_key)
+    print(f"[2/7] ✓ Client created")
     
-    # Add size guidance to the synthesis
-    size_guidance = (
-        f"\n\nIMPORTANT: Keep theory under {THEORY_TARGET_TOKENS:,} tokens "
-        f"(hard limit {THEORY_HARD_LIMIT_TOKENS:,} tokens). "
-        "Focus on most important concepts, not exhaustive coverage."
-    )
+    print(f"[3/7] Counting input tokens...")
+    existing_tokens = count_tokens(existing_theory)
+    claims_tokens = count_tokens(new_video_claims or 'none')
+    print(f"[3/7] ✓ Existing theory: {existing_tokens:,} tokens, Claims: {claims_tokens:,} tokens")
+    logger.info(f"Input size: existing_theory={existing_tokens:,} tokens, claims={claims_tokens:,} tokens")
     
-    # Synthesize
-    result = synthesize(
-        source_name=source_name,
-        domain=domain,
-        graph_summary=graph_summary + size_guidance,
-        terms_summary=terms_summary,
-        existing_theory=existing_theory,
-        new_video_claims=new_video_claims or "none"
-    )
+    print(f"[4/7] Building prompt...")
+    # Build user prompt
+    user_prompt = f"""Source: {source_name}
+Domain: {domain}
+
+Existing Theory:
+{existing_theory if existing_theory != "none" else "(none - creating new theory)"}
+
+New Video Claims:
+{new_video_claims or "(none)"}
+
+Task: {"Expand the existing theory" if existing_theory != "none" else "Create a new theory"} by synthesizing these new claims into a coherent narrative."""
     
-    theory_text = result.theory
+    prompt_tokens = count_tokens(user_prompt)
+    print(f"[4/7] ✓ Prompt built ({prompt_tokens:,} tokens)")
     
+    print(f"[5/7] Calling Claude Opus 4.6 with streaming (max_tokens=65536)...")
+    logger.info("Calling Claude Opus 4.6 with streaming...")
+    
+    # Call API with streaming for large max_tokens
+    theory_chunks = []
+    chunk_count = 0
+    print(f"[5/7] Waiting for first response chunk...")
+    with client.messages.stream(
+        model='claude-opus-4-6',
+        max_tokens=65536,  # Allow up to 65K tokens output
+        system=THEORY_SYNTHESIS_SYSTEM,
+        messages=[{
+            'role': 'user',
+            'content': user_prompt
+        }]
+    ) as stream:
+        print(f"[5/7] ✓ Stream started, receiving chunks...")
+        for text in stream.text_stream:
+            theory_chunks.append(text)
+            chunk_count += 1
+            if chunk_count % 10 == 0:
+                print(f"[5/7] ...received {chunk_count} chunks ({len(''.join(theory_chunks))} chars so far)")
+    
+    print(f"[5/7] ✓ Streaming complete ({chunk_count} chunks total)")
+    
+    print(f"[6/7] Joining chunks and getting usage stats...")
+    theory_text = ''.join(theory_chunks)
+    
+    # Get final message for usage stats
+    final_message = stream.get_final_message()
+    print(f"[6/7] ✓ Generated {len(theory_text)} chars")
+    print(f"[6/7] ✓ Usage: {final_message.usage.input_tokens:,} in, {final_message.usage.output_tokens:,} out")
+    logger.info(f"Synthesis complete. Usage: {final_message.usage.input_tokens:,} in, {final_message.usage.output_tokens:,} out")
+    
+    print(f"[7/7] Validating token count...")
     # Validate token count
     token_count = count_tokens(theory_text)
+    print(f"[7/7] ✓ Token count: {token_count:,} tokens")
     
     if token_count > THEORY_HARD_LIMIT_TOKENS:
+        print(f"[7/7] ✗ ERROR: Exceeds hard limit ({THEORY_HARD_LIMIT_TOKENS:,} tokens)")
         raise ValueError(
             f"Generated theory exceeds hard limit: {token_count:,} tokens > "
             f"{THEORY_HARD_LIMIT_TOKENS:,} tokens. Theory must fit in Claude Opus 4.6 "
@@ -236,76 +254,64 @@ def synthesize_theory_dspy(
         )
     
     if token_count > THEORY_TARGET_TOKENS:
+        print(f"[7/7] ⚠ WARNING: Exceeds target ({THEORY_TARGET_TOKENS:,} tokens) but within hard limit")
         logger.warning(
             f"Theory size {token_count:,} tokens exceeds target {THEORY_TARGET_TOKENS:,} tokens "
             f"but within hard limit {THEORY_HARD_LIMIT_TOKENS:,} tokens"
         )
     else:
+        print(f"[7/7] ✓ Within target ({THEORY_TARGET_TOKENS:,} tokens)")
         logger.info(f"Theory size: {token_count:,} tokens (target: {THEORY_TARGET_TOKENS:,})")
     
+    print(f"[7/7] ✓ Validation complete\n")
     return theory_text
 
 
 def synthesize_theory(
-    graph_path: str,
-    terms_path: str,
     source_name: str,
     domain: str,
-    existing_theory_path: Optional[str] = None,
-    claims_path: Optional[str] = None
+    claims_path: str,
+    existing_theory_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Complete theory synthesis pipeline.
     
+    Theory synthesis is simple: existing_theory + new_claims → updated_theory
+    
     Args:
-        graph_path: Path to graph.json
-        terms_path: Path to terms.json
         source_name: Name of source/author
         domain: Research domain
+        claims_path: Path to video claims
         existing_theory_path: Path to existing THEORY.md
-        claims_path: Path to latest video claims (for updates)
     
     Returns:
         Dict with 'path', 'created', 'updated'
     """
-    graph_path = Path(graph_path)
-    terms_path = Path(terms_path)
+    claims_path = Path(claims_path)
     existing_theory_path = Path(existing_theory_path) if existing_theory_path else None
-    
-    # Load data
-    graph = validate_and_load(graph_path, 'graph')
-    terms = validate_and_load(terms_path, 'terms')
     
     # Load existing theory if present
     existing_theory = load_existing_theory(existing_theory_path)
     
-    # Summarize graph
-    graph_summary = summarize_graph(graph)
+    # Load new video claims
+    if not claims_path.exists():
+        raise FileNotFoundError(f"Claims file not found: {claims_path}")
     
-    # Summarize terms
-    terms_summary = summarize_terms(terms)
+    with open(claims_path) as f:
+        claims = json.load(f)
     
-    # Load new video claims if updating
-    new_video_claims = None
-    if claims_path:
-        claims_path = Path(claims_path)
-        if claims_path.exists():
-            with open(claims_path) as f:
-                claims = json.load(f)
-            # Extract key claims
-            new_video_claims = "\n".join([
-                f"- {claim['claim']} [{claim.get('citation', claim.get('citationId', 'no-citation'))}]"
-                for claim in claims[:20]  # Top 20 claims
-            ])
+    # Format claims
+    new_video_claims = "\n".join([
+        f"- {claim['claim']}"
+        for claim in claims
+    ])
     
-    logger.info(f"Synthesizing theory for {source_name} ({domain})")
+    logger.info(f"Synthesizing theory for {source_name} ({domain}) from {len(claims)} claims")
     
     # Synthesize theory
-    theory_content = synthesize_theory_dspy(
+    theory_content = synthesize_theory_anthropic(
         source_name=source_name,
         domain=domain,
-        graph_summary=graph_summary,
-        terms_summary=terms_summary,
         existing_theory=existing_theory,
         new_video_claims=new_video_claims
     )
@@ -315,7 +321,7 @@ def synthesize_theory(
         output_path = existing_theory_path
         created = False
     else:
-        output_path = graph_path.parent / 'THEORY.md'
+        output_path = claims_path.parent / 'THEORY.md'
         created = True
     
     # Write theory
@@ -335,22 +341,18 @@ if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='Synthesize theory narrative')
-    parser.add_argument('graph_path', help='Path to graph.json')
-    parser.add_argument('terms_path', help='Path to terms.json')
+    parser.add_argument('claims_path', help='Path to video claims')
     parser.add_argument('--source-name', required=True, help='Name of source/author')
     parser.add_argument('--domain', required=True, help='Research domain')
     parser.add_argument('--existing-theory', help='Path to existing THEORY.md')
-    parser.add_argument('--claims', help='Path to latest video claims')
     
     args = parser.parse_args()
     
     result = synthesize_theory(
-        graph_path=args.graph_path,
-        terms_path=args.terms_path,
         source_name=args.source_name,
         domain=args.domain,
-        existing_theory_path=args.existing_theory,
-        claims_path=args.claims
+        claims_path=args.claims_path,
+        existing_theory_path=args.existing_theory
     )
     
     print(json.dumps(result, indent=2))
