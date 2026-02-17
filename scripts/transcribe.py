@@ -45,7 +45,7 @@ def download_audio(video_url: str, output_dir: Path) -> tuple[Path, Dict[str, An
     """
     video_id = extract_video_id(video_url)
     output_path = output_dir / f"video-{video_id}.mp3"
-    info_path = output_dir / f"video-{video_id}.info.json"
+    info_path = output_dir / f"video-{video_id}.mp3.info.json"  # yt-dlp appends to full filename
     
     # Check if audio and metadata already exist
     if output_path.exists() and info_path.exists():
@@ -269,7 +269,8 @@ def transcribe_video(
         audio_path.unlink()
         logger.info(f"Cleaned up audio: {audio_path}")
     
-    info_path = audio_path.with_suffix('.info.json')
+    # yt-dlp appends .info.json to the full filename including extension
+    info_path = Path(str(audio_path) + '.info.json')
     if info_path.exists():
         info_path.unlink()
     
