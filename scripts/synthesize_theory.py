@@ -10,10 +10,24 @@ from typing import Dict, Any, List, Optional
 
 import dspy
 from dspy import Signature, InputField, OutputField
+import tiktoken
 
 from validate import validate_and_load
 
 logger = logging.getLogger(__name__)
+
+# Theory size constraints for Claude Opus 4.6
+# Context: 200K tokens, Max output: 128K tokens
+# Input budget: 200K - 128K = 72K
+# Overhead (graph + terms + claims + prompts): ~30K
+# Available for theory: 72K - 30K = 42K
+THEORY_TARGET_TOKENS = 40000  # Target size (conservative)
+THEORY_HARD_LIMIT_TOKENS = 60000  # Hard limit (safety margin)
+
+def count_tokens(text: str, model: str = "cl100k_base") -> int:
+    """Count tokens using tiktoken."""
+    enc = tiktoken.get_encoding(model)
+    return len(enc.encode(text))
 
 
 # DSPy signature for theory synthesis
@@ -24,17 +38,17 @@ class SynthesizeTheory(Signature):
     domain: str = InputField(desc="Research domain (e.g., theology/pharmacology)")
     graph_summary: str = InputField(desc="Summary of key nodes/edges from knowledge graph")
     terms_summary: str = InputField(desc="Summary of key term definitions")
-    existing_theory: str = InputField(desc="Existing THEORY.md content if updating, or 'none'")
+    existing_theory: str = InputField(desc="Existing THEORY.md section headers if updating, or 'none'")
     new_video_claims: str = InputField(desc="Key claims from new video if updating, or 'none'")
     
     theory: str = OutputField(
-        desc="Coherent narrative synthesizing the author's worldview. "
+        desc="Coherent narrative synthesizing the author's worldview from current graph+terms data. "
              "Write in clear prose that connects concepts into a unified theory. "
              "Organize into thematic sections with markdown headers (## Section). "
              "State ONLY what the source material establishes - zero external knowledge. "
              "NO citations - this is clean prose. Evidence lives in graph/terms layers. "
-             "If updating existing theory: EXPAND sections with new insights, don't rewrite from scratch. "
-             "Add new sections if new themes emerge. Preserve existing narrative flow."
+             "If existing sections provided: synthesize fresh from current data, maintaining similar structure/themes. "
+             "Focus on the most important concepts from the graph, not exhaustive coverage."
     )
 
 
@@ -106,13 +120,21 @@ def summarize_terms(terms: List[Dict[str, Any]]) -> str:
 
 def load_existing_theory(theory_path: Optional[Path]) -> str:
     """
-    Load existing THEORY.md content.
+    Load existing THEORY.md section headers (not full content).
+    
+    For large theories, passing full content creates massive prompts that timeout.
+    Instead, pass only section structure so LLM knows what exists.
+    
+    Also validates that existing theory doesn't exceed size limits.
     
     Args:
         theory_path: Path to THEORY.md
     
     Returns:
-        Existing content or "none"
+        Section headers or "none"
+    
+    Raises:
+        ValueError: If existing theory exceeds hard token limit
     """
     if not theory_path or not theory_path.exists():
         return "none"
@@ -120,7 +142,30 @@ def load_existing_theory(theory_path: Optional[Path]) -> str:
     with open(theory_path) as f:
         content = f.read()
     
-    return content if content.strip() else "none"
+    if not content.strip():
+        return "none"
+    
+    # Check existing theory size
+    token_count = count_tokens(content)
+    logger.info(f"Existing theory: {token_count:,} tokens")
+    
+    if token_count > THEORY_HARD_LIMIT_TOKENS:
+        raise ValueError(
+            f"Existing theory {token_count:,} tokens exceeds hard limit "
+            f"{THEORY_HARD_LIMIT_TOKENS:,} tokens. Theory must be condensed before "
+            f"adding new content. Target: {THEORY_TARGET_TOKENS:,} tokens."
+        )
+    
+    # Extract section headers only (## lines)
+    headers = []
+    for line in content.split('\n'):
+        if line.startswith('##'):
+            headers.append(line)
+    
+    if not headers:
+        return "none"
+    
+    return "EXISTING SECTIONS:\n" + "\n".join(headers[:50])  # Max 50 headers
 
 
 def synthesize_theory_dspy(
@@ -130,22 +175,29 @@ def synthesize_theory_dspy(
     terms_summary: str,
     existing_theory: str = "none",
     new_video_claims: Optional[str] = None,
-    model: str = "claude-sonnet-4-5"
+    model: str = "claude-opus-4-6"
 ) -> str:
     """
-    Synthesize theory using DSPy.
+    Synthesize theory using DSPy with Claude Opus 4.6.
+    
+    Enforces token limits:
+    - Target: 40K tokens (conservative)
+    - Hard limit: 60K tokens (fails if exceeded)
     
     Args:
         source_name: Name of source/author
         domain: Research domain
         graph_summary: Summary of knowledge graph
         terms_summary: Summary of terms
-        existing_theory: Existing THEORY.md content
+        existing_theory: Existing THEORY.md section headers
         new_video_claims: Key claims from new video
-        model: DSPy model
+        model: DSPy model (default: claude-opus-4-6)
     
     Returns:
         THEORY.md markdown content
+    
+    Raises:
+        ValueError: If generated theory exceeds hard token limit
     """
     # Setup DSPy
     lm = dspy.LM(model)
@@ -154,17 +206,44 @@ def synthesize_theory_dspy(
     # Create synthesis module
     synthesize = dspy.ChainOfThought(SynthesizeTheory)
     
+    # Add size guidance to the synthesis
+    size_guidance = (
+        f"\n\nIMPORTANT: Keep theory under {THEORY_TARGET_TOKENS:,} tokens "
+        f"(hard limit {THEORY_HARD_LIMIT_TOKENS:,} tokens). "
+        "Focus on most important concepts, not exhaustive coverage."
+    )
+    
     # Synthesize
     result = synthesize(
         source_name=source_name,
         domain=domain,
-        graph_summary=graph_summary,
+        graph_summary=graph_summary + size_guidance,
         terms_summary=terms_summary,
         existing_theory=existing_theory,
         new_video_claims=new_video_claims or "none"
     )
     
-    return result.theory
+    theory_text = result.theory
+    
+    # Validate token count
+    token_count = count_tokens(theory_text)
+    
+    if token_count > THEORY_HARD_LIMIT_TOKENS:
+        raise ValueError(
+            f"Generated theory exceeds hard limit: {token_count:,} tokens > "
+            f"{THEORY_HARD_LIMIT_TOKENS:,} tokens. Theory must fit in Claude Opus 4.6 "
+            f"output budget (128K tokens with headroom)."
+        )
+    
+    if token_count > THEORY_TARGET_TOKENS:
+        logger.warning(
+            f"Theory size {token_count:,} tokens exceeds target {THEORY_TARGET_TOKENS:,} tokens "
+            f"but within hard limit {THEORY_HARD_LIMIT_TOKENS:,} tokens"
+        )
+    else:
+        logger.info(f"Theory size: {token_count:,} tokens (target: {THEORY_TARGET_TOKENS:,})")
+    
+    return theory_text
 
 
 def synthesize_theory(
