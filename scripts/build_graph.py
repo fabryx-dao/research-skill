@@ -328,6 +328,14 @@ def build_graph_dspy(
     
     logger.info(f"Extracted {len(triplets)} triplets from DSPy")
     
+    # Add videoId to evidence objects by matching citations to original claims
+    citation_to_video_id = {claim['citation']: claim.get('videoId') for claim in claims_with_citations}
+    for triplet in triplets:
+        for evidence in triplet.get('evidence', []):
+            citation = evidence.get('citation')
+            if citation and citation in citation_to_video_id:
+                evidence['videoId'] = citation_to_video_id[citation]
+    
     # Filter out triplets with invalid node types
     triplets = filter_invalid_triplets(triplets)
     logger.info(f"After filtering: {len(triplets)} valid triplets")
