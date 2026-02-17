@@ -49,6 +49,80 @@ class ProgressTracker:
         logger.info(f"[{stage}] {status}" + (f": {details}" if details else ""))
 
 
+def create_source_structure(
+    base_dir: Path,
+    source_id: str,
+    source_name: str,
+    source_slug: str,
+    category: str = "research",
+    channel: str = "",
+    description: str = ""
+) -> Dict[str, str]:
+    """
+    Create complete source directory structure for Deep Memory website.
+    
+    Args:
+        base_dir: Base sources directory (e.g., ~/repos/deepmemory/site/sources)
+        source_id: Source ID (e.g., "004")
+        source_name: Human-readable name (e.g., "Jimmy Dore")
+        source_slug: URL-safe slug (e.g., "jimmy-dore")
+        category: Source category
+        channel: YouTube/social channel handle
+        description: Brief description
+    
+    Returns:
+        Dict with paths to created files
+    """
+    source_dir = base_dir / source_slug
+    archive_dir = source_dir / 'archive'
+    
+    # Create directories
+    source_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir.mkdir(exist_ok=True)
+    
+    # Create SOURCE.json
+    source_json = {
+        'id': source_id,
+        'name': source_name,
+        'slug': source_slug,
+        'category': category,
+        'channel': channel,
+        'description': description
+    }
+    source_json_path = source_dir / 'SOURCE.json'
+    with open(source_json_path, 'w') as f:
+        json.dump(source_json, f, indent=2)
+    
+    # Create empty graph.json
+    graph_path = source_dir / 'graph.json'
+    if not graph_path.exists():
+        with open(graph_path, 'w') as f:
+            json.dump({'nodes': [], 'edges': []}, f, indent=2)
+    
+    # Create empty terms.json
+    terms_path = source_dir / 'terms.json'
+    if not terms_path.exists():
+        with open(terms_path, 'w') as f:
+            json.dump([], f, indent=2)
+    
+    # Create empty THEORY.md
+    theory_path = source_dir / 'THEORY.md'
+    if not theory_path.exists():
+        with open(theory_path, 'w') as f:
+            f.write(f"# {source_name}'s Theory\n\n(No content yet - will be generated from videos)\n")
+    
+    logger.info(f"Created source structure: {source_dir}")
+    
+    return {
+        'source_dir': str(source_dir),
+        'archive_dir': str(archive_dir),
+        'source_json': str(source_json_path),
+        'graph': str(graph_path),
+        'terms': str(terms_path),
+        'theory': str(theory_path)
+    }
+
+
 def research(
     video_url: str,
     source_id: str,
@@ -60,7 +134,12 @@ def research(
     existing_theory: Optional[str] = None,
     output_dir: Optional[str] = None,
     validate_strict: bool = True,
-    assemblyai_key: Optional[str] = None
+    assemblyai_key: Optional[str] = None,
+    create_source: bool = False,
+    source_slug: Optional[str] = None,
+    source_category: str = "research",
+    source_channel: str = "",
+    source_description: str = ""
 ) -> Dict[str, Any]:
     """
     Main entry point: process video through full pipeline.
@@ -77,6 +156,11 @@ def research(
         output_dir: Output directory for archive files
         validate_strict: Fail on validation errors
         assemblyai_key: AssemblyAI API key (or from env)
+        create_source: Create new source directory structure
+        source_slug: URL-safe slug for new source (e.g., "jimmy-dore")
+        source_category: Category for new source
+        source_channel: YouTube channel for new source
+        source_description: Description for new source
     
     Returns:
         Dict with paths to all created/updated files
@@ -85,6 +169,48 @@ def research(
     # Setup
     progress = ProgressTracker(Path(__file__).parent.parent / '.progress')
     progress.update('init', 'started', f'Processing {video_url}')
+    
+    # Create source structure if requested
+    if create_source:
+        if not source_slug:
+            # Auto-generate slug from source name
+            source_slug = source_name.lower().replace(' ', '-').replace('_', '-')
+        
+        # Determine base directory - try to find deepmemory site
+        if output_dir:
+            base_dir = Path(output_dir).parent
+        else:
+            # Try to find deepmemory/site/sources
+            home = Path.home()
+            candidate = home / 'repos' / 'deepmemory' / 'site' / 'sources'
+            if candidate.exists():
+                base_dir = candidate
+            else:
+                raise ValueError("Cannot determine base sources directory. Provide output_dir or ensure ~/repos/deepmemory/site/sources exists")
+        
+        progress.update('source_creation', 'started', f'Creating source structure for {source_name}')
+        
+        source_paths = create_source_structure(
+            base_dir=base_dir if not output_dir else Path(output_dir).parent,
+            source_id=source_id,
+            source_name=source_name,
+            source_slug=source_slug,
+            category=source_category,
+            channel=source_channel,
+            description=source_description
+        )
+        
+        # Update paths to use newly created structure
+        if not output_dir:
+            output_dir = source_paths['archive_dir']
+        if not existing_graph:
+            existing_graph = source_paths['graph']
+        if not existing_terms:
+            existing_terms = source_paths['terms']
+        if not existing_theory:
+            existing_theory = source_paths['theory']
+        
+        progress.update('source_creation', 'completed', f'Source structure created at {source_paths["source_dir"]}')
     
     # Get API key
     api_key = assemblyai_key or os.getenv('ASSEMBLYAI_API_KEY')
@@ -183,6 +309,11 @@ if __name__ == '__main__':
     parser.add_argument('--existing-graph', help='Path to existing graph.json (for merging)')
     parser.add_argument('--existing-terms', help='Path to existing terms.json (for merging)')
     parser.add_argument('--existing-theory', help='Path to existing THEORY.md (for enhancement)')
+    parser.add_argument('--create-source', action='store_true', help='Create new source directory structure')
+    parser.add_argument('--source-slug', help='URL-safe slug for new source (auto-generated if not provided)')
+    parser.add_argument('--source-category', default='research', help='Category for new source')
+    parser.add_argument('--source-channel', default='', help='YouTube channel for new source')
+    parser.add_argument('--source-description', default='', help='Description for new source')
     
     args = parser.parse_args()
     
@@ -194,7 +325,12 @@ if __name__ == '__main__':
         output_dir=args.output_dir,
         existing_graph=args.existing_graph,
         existing_terms=args.existing_terms,
-        existing_theory=args.existing_theory
+        existing_theory=args.existing_theory,
+        create_source=args.create_source,
+        source_slug=args.source_slug,
+        source_category=args.source_category,
+        source_channel=args.source_channel,
+        source_description=args.source_description
     )
     
     print(json.dumps(result, indent=2))
