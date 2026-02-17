@@ -110,7 +110,9 @@ def research(
         transcript_result = transcribe_video(
             video_url=video_url,
             api_key=api_key,
-            output_dir=output_dir
+            output_dir=output_dir,
+            source_id=source_id,
+            source_name=source_name
         )
         results['transcript'] = transcript_result
         progress.update('transcription', 'completed', f"Saved {transcript_result['path']}")

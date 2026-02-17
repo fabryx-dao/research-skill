@@ -32,23 +32,27 @@ def extract_video_id(video_url: str) -> str:
         raise ValueError(f"Invalid YouTube URL: {video_url}")
 
 
-def download_audio(video_url: str, output_dir: Path) -> Path:
+def download_audio(video_url: str, output_dir: Path) -> tuple[Path, Dict[str, Any]]:
     """
-    Download audio from YouTube video using yt-dlp.
+    Download audio from YouTube video using yt-dlp and extract metadata.
     
     Args:
         video_url: YouTube video URL
         output_dir: Directory to save audio
     
     Returns:
-        Path to downloaded audio file
+        Tuple of (audio_path, video_metadata)
     """
     video_id = extract_video_id(video_url)
     output_path = output_dir / f"video-{video_id}.mp3"
+    info_path = output_dir / f"video-{video_id}.info.json"
     
-    if output_path.exists():
+    # Check if audio and metadata already exist
+    if output_path.exists() and info_path.exists():
         logger.info(f"Audio already exists: {output_path}")
-        return output_path
+        with open(info_path) as f:
+            metadata = json.load(f)
+        return output_path, metadata
     
     logger.info(f"Downloading audio: {video_url}")
     
@@ -57,6 +61,7 @@ def download_audio(video_url: str, output_dir: Path) -> Path:
         '-x',  # Extract audio
         '--audio-format', 'mp3',
         '--audio-quality', '0',  # Best quality
+        '--write-info-json',  # Save video metadata
         '-o', str(output_path),
         video_url
     ]
@@ -69,8 +74,16 @@ def download_audio(video_url: str, output_dir: Path) -> Path:
     if not output_path.exists():
         raise RuntimeError(f"Audio file not created: {output_path}")
     
+    if not info_path.exists():
+        raise RuntimeError(f"Metadata file not created: {info_path}")
+    
     logger.info(f"Audio downloaded: {output_path}")
-    return output_path
+    
+    # Load metadata
+    with open(info_path) as f:
+        metadata = json.load(f)
+    
+    return output_path, metadata
 
 
 def transcribe_with_assemblyai(
@@ -151,19 +164,23 @@ def transcribe_video(
     video_url: str,
     api_key: str,
     output_dir: Optional[str] = None,
-    item_id: Optional[str] = None
+    item_id: Optional[str] = None,
+    source_id: Optional[str] = None,
+    source_name: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Complete transcription pipeline: download audio + transcribe.
+    Complete transcription pipeline: download audio + transcribe + save metadata.
     
     Args:
         video_url: YouTube video URL
         api_key: AssemblyAI API key
         output_dir: Output directory (defaults to /tmp/research)
         item_id: Override item ID (e.g., "0004"), otherwise auto-detect
+        source_id: Source ID (e.g., "003") for metadata
+        source_name: Source name (e.g., "Geoffrey Drumm") for metadata
     
     Returns:
-        Dict with 'path' (transcript file) and 'video_id'
+        Dict with 'path' (transcript file), 'video_id', and 'metadata_path'
     """
     # Setup output directory
     if output_dir:
@@ -173,8 +190,8 @@ def transcribe_video(
     
     out_path.mkdir(parents=True, exist_ok=True)
     
-    # Download audio
-    audio_path = download_audio(video_url, out_path)
+    # Download audio and get metadata
+    audio_path, yt_metadata = download_audio(video_url, out_path)
     
     # Transcribe
     transcript_data = transcribe_with_assemblyai(audio_path, api_key)
@@ -197,14 +214,69 @@ def transcribe_video(
     transcript_path = out_path / f"video-{item_id}-transcript.json"
     save_validated(transcript_data, transcript_path, 'transcript')
     
-    # Clean up audio file
+    # Create and save metadata
+    from datetime import datetime
+    
+    # Format duration from seconds to MM:SS or HH:MM:SS
+    duration_seconds = yt_metadata.get('duration', 0)
+    if duration_seconds >= 3600:
+        hours = duration_seconds // 3600
+        minutes = (duration_seconds % 3600) // 60
+        seconds = duration_seconds % 60
+        duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+    else:
+        minutes = duration_seconds // 60
+        seconds = duration_seconds % 60
+        duration_str = f"{minutes}:{seconds:02d}"
+    
+    # Format published date from upload_date (YYYYMMDD) to YYYY-MM-DD
+    upload_date_str = str(yt_metadata.get('upload_date', ''))
+    if len(upload_date_str) == 8:
+        published_date = f"{upload_date_str[:4]}-{upload_date_str[4:6]}-{upload_date_str[6:8]}"
+    else:
+        published_date = None
+    
+    metadata = {
+        'videoId': item_id,
+        'title': yt_metadata.get('title', 'Unknown'),
+        'url': video_url,
+        'processedDate': datetime.now().strftime('%Y-%m-%d')
+    }
+    
+    # Add optional fields
+    if source_id:
+        metadata['sourceId'] = source_id
+    if source_name:
+        metadata['sourceName'] = source_name
+    if duration_seconds > 0:
+        metadata['duration'] = duration_str
+    if published_date:
+        metadata['publishedDate'] = published_date
+    if yt_metadata.get('description'):
+        metadata['description'] = yt_metadata['description'][:500]  # Limit description length
+    if yt_metadata.get('thumbnail'):
+        metadata['thumbnailUrl'] = yt_metadata['thumbnail']
+    if yt_metadata.get('channel'):
+        metadata['channelName'] = yt_metadata['channel']
+    
+    # Save metadata
+    metadata_path = out_path / f"video-{item_id}-metadata.json"
+    save_validated(metadata, metadata_path, 'metadata')
+    logger.info(f"Metadata saved: {metadata_path}")
+    
+    # Clean up audio file and yt-dlp info
     if audio_path.exists():
         audio_path.unlink()
         logger.info(f"Cleaned up audio: {audio_path}")
     
+    info_path = audio_path.with_suffix('.info.json')
+    if info_path.exists():
+        info_path.unlink()
+    
     return {
         'path': str(transcript_path),
         'video_id': item_id,
+        'metadata_path': str(metadata_path),
         'utterances': len(transcript_data['transcript']),
         'duration': transcript_data.get('duration', 0)
     }
