@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Stage 2: Extract domain-relevant assertions from transcript using DSPy.
+Uses chained FFT approach: Lowpass → Bandpass → Highpass
 """
 
 import json
@@ -17,138 +18,147 @@ from validate import validate_and_load, save_validated
 logger = logging.getLogger(__name__)
 
 
-# DSPy signature for claim extraction
-class ExtractClaims(Signature):
-    """Extract domain-relevant assertions made in a transcript segment."""
+# Lowpass: Extract the core thesis/message
+class LowpassFilter(Signature):
+    """Extract the single core thesis or main message from a transcript.
     
-    transcript_segment: str = InputField(desc="Segment of transcript text")
-    domain: str = InputField(desc="Domain description (what to filter FOR)")
+    This is the lowest frequency - the fundamental idea that unifies everything.
+    Think: "If you could only remember ONE thing from this, what would it be?"
+    """
     
-    claims: List[str] = OutputField(
-        desc="List of domain-relevant assertions. "
-             "Each claim should be a complete, standalone statement. "
-             "Filter OUT: personal anecdotes, off-topic tangents, modern politics, etc. "
-             "Include ONLY assertions directly relevant to the domain."
+    transcript: str = InputField(desc="Full transcript text")
+    domain: str = InputField(desc="Domain context (e.g., 'pyramid archaeology and industrial chemistry')")
+    
+    thesis: str = OutputField(
+        desc="Single statement capturing the core thesis. "
+             "Must be ONE complete sentence. "
+             "This is the foundation - everything else elaborates on this."
     )
 
 
-def chunk_transcript(transcript: List[Dict[str, Any]], chunk_size: int = 20) -> List[str]:
+# Bandpass: Extract mid-level claims/framework
+class BandpassFilter(Signature):
+    """Extract mid-frequency claims - the conceptual framework and key assertions.
+    
+    Given the core thesis, extract the main claims that support/develop it.
+    These are complete ideas but not detailed evidence yet.
+    Think: The chapter headings or main points in an outline.
     """
-    Split transcript into overlapping chunks for processing.
     
-    Args:
-        transcript: List of transcript entries with 'text'
-        chunk_size: Number of utterances per chunk
+    transcript: str = InputField(desc="Full transcript text")
+    domain: str = InputField(desc="Domain context")
+    thesis: str = InputField(desc="Core thesis from lowpass filter")
     
-    Returns:
-        List of text chunks
-    """
-    chunks = []
-    
-    for i in range(0, len(transcript), chunk_size // 2):  # 50% overlap
-        chunk_entries = transcript[i:i + chunk_size]
-        chunk_text = " ".join(entry['text'] for entry in chunk_entries)
-        chunks.append(chunk_text)
-    
-    return chunks
+    claims: List[str] = OutputField(
+        desc="List of mid-level claims (5-15 claims). "
+             "Each should be a complete assertion. "
+             "Should elaborate on the thesis but NOT repeat it. "
+             "Don't include detailed evidence yet - just the conceptual framework."
+    )
 
 
-def extract_claims_dspy(
+# Highpass: Extract supporting details/evidence
+class HighpassFilter(Signature):
+    """Extract high-frequency details - specific evidence, examples, and technical details.
+    
+    Given the thesis and main claims, extract the supporting details.
+    These are the facts, measurements, observations that back up the framework.
+    Think: The evidence, the specifics, the "receipts".
+    """
+    
+    transcript: str = InputField(desc="Full transcript text")
+    domain: str = InputField(desc="Domain context")
+    thesis: str = InputField(desc="Core thesis from lowpass filter")
+    claims: List[str] = InputField(desc="Mid-level claims from bandpass filter")
+    
+    details: List[str] = OutputField(
+        desc="List of high-frequency details (20-100 details). "
+             "Each should be specific evidence, measurements, or observations. "
+             "Should support the claims but NOT repeat them. "
+             "Include: technical specs, measurements, material properties, observations, etc."
+    )
+
+
+def fft(
     transcript_path: Path,
     domain: str,
-    filter_keywords: Optional[List[str]] = None,
     model: str = "claude-sonnet-4-5"
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
-    Extract domain-relevant claims using DSPy.
+    Chained FFT extraction: Lowpass → Bandpass → Highpass
+    
+    Mimics signal processing by extracting hierarchical abstractions:
+    - Lowpass: Core thesis (1 statement)
+    - Bandpass: Conceptual framework (5-15 claims)
+    - Highpass: Supporting evidence (20-100 details)
     
     Args:
         transcript_path: Path to transcript JSON
-        domain: Domain description for filtering
-        filter_keywords: Optional keywords to help filtering
+        domain: Domain description
         model: DSPy model to use
     
     Returns:
-        List of extracted claims (without citations yet)
+        Dict with 'thesis', 'claims', 'details', 'all_statements'
     """
     # Load transcript
     transcript_data = validate_and_load(transcript_path, 'transcript')
-    transcript = transcript_data['transcript']
+    transcript_entries = transcript_data['transcript']
+    
+    # Convert to full text
+    transcript_text = " ".join(entry['text'] for entry in transcript_entries)
+    
+    logger.info(f"Transcript: {len(transcript_entries)} utterances, {len(transcript_text)} chars")
     
     # Setup DSPy
     lm = dspy.LM(model)
     dspy.configure(lm=lm)
     
-    # Create extraction module
-    extract = dspy.ChainOfThought(ExtractClaims)
+    # Create modules
+    lowpass = dspy.ChainOfThought(LowpassFilter)
+    bandpass = dspy.ChainOfThought(BandpassFilter)
+    highpass = dspy.ChainOfThought(HighpassFilter)
     
-    # Chunk transcript
-    chunks = chunk_transcript(transcript)
-    logger.info(f"Processing {len(chunks)} chunks from {len(transcript)} utterances")
+    # Stage 1: Lowpass (extract thesis)
+    logger.info("FFT Stage 1: Lowpass (extracting core thesis)")
+    lp_result = lowpass(
+        transcript=transcript_text,
+        domain=domain
+    )
+    thesis = lp_result.thesis
+    logger.info(f"Thesis extracted: {thesis[:100]}...")
     
-    # Extract claims from each chunk
-    all_claims = []
+    # Stage 2: Bandpass (extract claims given thesis)
+    logger.info("FFT Stage 2: Bandpass (extracting conceptual framework)")
+    bp_result = bandpass(
+        transcript=transcript_text,
+        domain=domain,
+        thesis=thesis
+    )
+    claims = bp_result.claims
+    logger.info(f"Claims extracted: {len(claims)}")
     
-    for idx, chunk in enumerate(chunks):
-        logger.info(f"Extracting from chunk {idx + 1}/{len(chunks)}")
-        
-        try:
-            result = extract(
-                transcript_segment=chunk,
-                domain=domain
-            )
-            
-            # DSPy returns typed list directly
-            claims = result.claims
-            
-            if not isinstance(claims, list):
-                logger.warning(f"Expected list, got {type(claims)} - skipping chunk {idx}")
-                continue
-            
-            all_claims.extend(claims)
-            
-        except Exception as e:
-            logger.warning(f"Failed to extract from chunk {idx}: {e}")
-            continue
+    # Stage 3: Highpass (extract details given thesis + claims)
+    logger.info("FFT Stage 3: Highpass (extracting supporting evidence)")
+    hp_result = highpass(
+        transcript=transcript_text,
+        domain=domain,
+        thesis=thesis,
+        claims=claims
+    )
+    details = hp_result.details
+    logger.info(f"Details extracted: {len(details)}")
     
-    logger.info(f"Extracted {len(all_claims)} raw claims")
+    # Combine all statements
+    all_statements = [thesis] + claims + details
     
-    # Deduplicate similar claims
-    unique_claims = _deduplicate_claims(all_claims)
-    logger.info(f"After deduplication: {len(unique_claims)} unique claims")
+    logger.info(f"FFT complete: 1 thesis + {len(claims)} claims + {len(details)} details = {len(all_statements)} total")
     
-    return unique_claims
-
-
-def _deduplicate_claims(claims: List[str], similarity_threshold: float = 0.85) -> List[str]:
-    """
-    Deduplicate claims using simple text similarity.
-    
-    Args:
-        claims: List of claim strings
-        similarity_threshold: Similarity threshold (0-1)
-    
-    Returns:
-        Deduplicated list
-    """
-    from difflib import SequenceMatcher
-    
-    unique = []
-    
-    for claim in claims:
-        # Check if similar to any existing unique claim
-        is_duplicate = False
-        
-        for existing in unique:
-            similarity = SequenceMatcher(None, claim.lower(), existing.lower()).ratio()
-            if similarity > similarity_threshold:
-                is_duplicate = True
-                break
-        
-        if not is_duplicate:
-            unique.append(claim)
-    
-    return unique
+    return {
+        'thesis': thesis,
+        'claims': claims,
+        'details': details,
+        'all_statements': all_statements
+    }
 
 
 def add_citation_ids(
@@ -187,21 +197,23 @@ def extract_claims(
     filter_keywords: Optional[List[str]] = None,
     source_id: str = "003",
     video_id: Optional[str] = None,
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    model: str = "claude-sonnet-4-5"
 ) -> Dict[str, Any]:
     """
-    Complete extraction pipeline.
+    Complete extraction pipeline using chained FFT.
     
     Args:
         transcript_path: Path to transcript JSON
         domain: Domain description
-        filter_keywords: Optional filter keywords
+        filter_keywords: Optional filter keywords (unused in FFT)
         source_id: Source ID for citations
         video_id: Video ID (auto-detected if not provided)
         output_dir: Output directory (defaults to transcript directory)
+        model: DSPy model to use
     
     Returns:
-        Dict with 'path', 'clean_path', 'count'
+        Dict with 'path', 'clean_path', 'count', 'thesis', 'claims_count', 'details_count'
     """
     transcript_path = Path(transcript_path)
     
@@ -219,22 +231,31 @@ def extract_claims(
     else:
         out_path = transcript_path.parent
     
-    # Extract claims
-    raw_claims = extract_claims_dspy(
+    # Run chained FFT extraction
+    fft_result = fft(
         transcript_path=transcript_path,
         domain=domain,
-        filter_keywords=filter_keywords
+        model=model
     )
     
-    # Add citation IDs
-    claims_with_citations = add_citation_ids(raw_claims, source_id, video_id)
+    thesis = fft_result['thesis']
+    claims = fft_result['claims']
+    details = fft_result['details']
+    all_statements = fft_result['all_statements']
     
-    # Save raw claims (without citation validation yet)
+    # Add citation IDs to all statements
+    claims_with_citations = add_citation_ids(all_statements, source_id, video_id)
+    
+    # Save raw statements (for debugging)
     raw_path = out_path / f"video-{video_id}-claims.json"
     with open(raw_path, 'w') as f:
-        json.dump([{'claim': c} for c in raw_claims], f, indent=2)
+        json.dump({
+            'thesis': thesis,
+            'claims': claims,
+            'details': details
+        }, f, indent=2)
     
-    logger.info(f"Saved raw claims: {raw_path}")
+    logger.info(f"Saved raw FFT output: {raw_path}")
     
     # Save claims with citations (validated)
     clean_path = out_path / f"video-{video_id}-claims-clean.json"
@@ -243,19 +264,23 @@ def extract_claims(
     return {
         'path': str(raw_path),
         'clean_path': str(clean_path),
-        'count': len(claims_with_citations)
+        'count': len(claims_with_citations),
+        'thesis': thesis,
+        'claims_count': len(claims),
+        'details_count': len(details)
     }
 
 
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='Extract claims from transcript')
+    parser = argparse.ArgumentParser(description='Extract claims from transcript using chained FFT')
     parser.add_argument('transcript_path', help='Path to transcript JSON')
     parser.add_argument('--domain', required=True, help='Domain description')
     parser.add_argument('--source-id', default='003', help='Source ID')
     parser.add_argument('--video-id', help='Video ID (auto-detected if not provided)')
     parser.add_argument('--output-dir', help='Output directory')
+    parser.add_argument('--model', default='claude-sonnet-4-5', help='DSPy model to use')
     
     args = parser.parse_args()
     
@@ -264,7 +289,8 @@ if __name__ == '__main__':
         domain=args.domain,
         source_id=args.source_id,
         video_id=args.video_id,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        model=args.model
     )
     
     print(json.dumps(result, indent=2))
